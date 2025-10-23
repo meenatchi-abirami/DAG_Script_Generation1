@@ -1,0 +1,119 @@
+import os
+import re
+from datetime import datetime
+from typing import List, Tuple
+from config import OPENAI_API_KEY
+
+def _call_chat_compat(model: str, messages: list, max_tokens: int = 1500, temperature: float = 0.0):
+    """Compatibility layer for different OpenAI client versions"""
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        resp = client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens, temperature=temperature)
+        return resp
+    except Exception:
+        pass
+    try:
+        import openai
+        openai.api_key = OPENAI_API_KEY
+        resp = openai.ChatCompletion.create(model=model, messages=messages, max_tokens=max_tokens, temperature=temperature)
+        return resp
+    except Exception:
+        raise
+
+class DAGGenerator:
+    def __init__(self, model: str = None):
+        self.model = model or os.getenv('OPENAI_MODEL', 'gpt-4')
+        self.schedule_mapping = {
+            'daily': '@daily',
+            '1 AM': '0 1 * * *',
+            '2 AM': '0 2 * * *',
+            '6 hours': '0 */6 * * *',
+            'midnight': '0 0 * * *',
+            '15 minutes': '*/15 * * * *',
+            'monday at 8 AM': '0 8 * * 1'
+        }
+
+    def _parse_tasks(self, text: str) -> List[str]:
+        """Extract tasks from input text."""
+        m = re.search(r'tasks:([^;]+)', text.lower())
+        if not m:
+            return []
+        return [t.strip() for t in m.group(1).split(',') if t.strip()]
+
+    def _parse_deps(self, text: str) -> List[Tuple[str, str]]:
+        """Extract dependencies from input text."""
+        m = re.search(r'dependencies:([^;]+)', text.lower())
+        if not m:
+            return []
+        deps = []
+        for part in m.group(1).split(','):
+            part = part.strip()
+            if '->' in part:
+                s, t = part.split('->')
+                deps.append((s.strip(), t.strip()))
+            elif 'then' in part or 'after' in part:
+                parts = re.split(r'\s+then\s+|\s+after\s+', part)
+                for i in range(len(parts)-1):
+                    deps.append((parts[i].strip(), parts[i+1].strip()))
+        return deps
+
+    def _local_generate(self, input_text: str) -> str:
+        """Fallback local generator."""
+        tasks = self._parse_tasks(input_text)
+        deps = self._parse_deps(input_text)
+
+        # Build simple DAG code
+        code = [
+            "from airflow import DAG",
+            "from airflow.operators.python_operator import PythonOperator",
+            "from datetime import datetime, timedelta",
+            "",
+        ]
+
+        for t in tasks:
+            code.append(f"def {t}(**context):\n    print('Running {t}')\n")
+
+        code.append("default_args = {\n    'owner': 'airflow',\n    'depends_on_past': False,\n    'start_date': datetime(2025, 1, 1),\n    'retries': 1,\n    'retry_delay': timedelta(minutes=5),\n}\n")
+        code.append("dag = DAG('generated_dag', default_args=default_args, schedule_interval='@daily')\n")
+
+        for t in tasks:
+            code.append(f"{t}_task = PythonOperator(task_id='{t}', python_callable={t}, dag=dag)\n")
+
+        for s, t in deps:
+            code.append(f"{s}_task >> {t}_task\n")
+
+        return "\n".join(code)
+
+    def generate(self, input_text: str) -> str:
+        """Generate DAG via OpenAI; fall back to local generator on error."""
+        # Try model-based generation if API key present
+        if OPENAI_API_KEY:
+            try:
+                system_msg = (
+                    "You are an expert data engineer specializing in Apache Airflow. "
+                    "Generate a valid and runnable Python Airflow DAG based on the user's description. "
+                    "Output only Python code for the DAG. Do not include any explanations."
+                )
+                messages = [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": input_text},
+                ]
+                resp = _call_chat_compat(
+                    model=self.model,
+                    messages=messages,
+                    max_tokens=1500,
+                    temperature=0.0,
+                )
+                if hasattr(resp.choices[0], 'message'):
+                    text = resp.choices[0].message.content
+                else:
+                    text = resp['choices'][0]['message']['content']
+                # Simple heuristic: if response contains 'def ' or 'DAG(', treat as code
+                if 'def ' in text or 'DAG(' in text:
+                    return text
+            except Exception as e:
+                print(f"OpenAI generation failed, falling back to local generator: {e}")
+
+        # Fallback
+        return self._local_generate(input_text)
