@@ -46,7 +46,7 @@ Return ONLY a JSON object in the following format:
 
 class ReviewerAgent:
     def __init__(self, model: str = None):
-        self.model = model or os.getenv('OPENAI_MODEL', 'gpt-4o')
+        self.model = model or os.getenv('OPENAI_MODEL', 'gpt-4')
         if not OPENAI_API_KEY:
             raise RuntimeError('OPENAI_API_KEY is not set in environment')
         # The openai API key is applied inside the compatibility caller when needed.
