@@ -1,7 +1,7 @@
+# chat_routes.py
 import pymysql
 from flask import Blueprint, request, jsonify
 from config import get_db_connection
-
 
 chat_bp = Blueprint('chat', __name__)
 
@@ -30,4 +30,24 @@ def get_chat_history():
             conn.close()
     except Exception as e:
         return jsonify({'error': str(e)}), 500
- 
+
+@chat_bp.route('/conversations', methods=['GET'])
+def get_conversations():
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+                cursor.execute("""
+                    SELECT session_id, title, created_at
+                    FROM conversations
+                    ORDER BY created_at DESC
+                """)
+                conversations = cursor.fetchall()
+            return jsonify({
+                'success': True,
+                'conversations': conversations
+            })
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500

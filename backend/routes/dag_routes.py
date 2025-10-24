@@ -1,3 +1,4 @@
+# dag_routes.py
 from flask import Blueprint, request, jsonify
 from config import get_db_connection
 from services.reviewer_agent import ReviewerAgent
@@ -17,6 +18,37 @@ def generate_dag():
         is_valid, feedback, raw = reviewer.validate(input_text)
 
         if not is_valid:
+            # Store invalid input and feedback in the database
+            try:
+                conn = get_db_connection()
+                try:
+                    with conn.cursor() as cursor:
+                        # Create or update conversation with title
+                        title = input_text[:50] + "..." if len(input_text) > 50 else input_text
+                        cursor.execute("""
+                            INSERT INTO conversations (session_id, title)
+                            VALUES (%s, %s)
+                            ON DUPLICATE KEY UPDATE title=%s
+                        """, (session_id, title, title))
+                        
+                        # Store user message
+                        cursor.execute("""
+                            INSERT INTO messages (conversation_id, message_type, content)
+                            VALUES ((SELECT conversation_id FROM conversations WHERE session_id = %s), 'user', %s)
+                        """, (session_id, input_text))
+                        
+                        # Store assistant feedback for invalid input
+                        cursor.execute("""
+                            INSERT INTO messages (conversation_id, message_type, content)
+                            VALUES ((SELECT conversation_id FROM conversations WHERE session_id = %s), 'system', %s)
+                        """, (session_id, feedback))
+                        
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception as db_error:
+                print(f"Database error (continuing anyway): {db_error}")
+            
             return jsonify({
                 'success': False,
                 'message': feedback,
@@ -27,25 +59,31 @@ def generate_dag():
         generator = DAGGenerator()
         dag_script = generator.generate(input_text)
         
-        # Try to store in database, but continue even if it fails
+        # Store in database
         try:
             conn = get_db_connection()
             try:
                 with conn.cursor() as cursor:
-                    # First, ensure conversation exists
+                    # Create or update conversation with title
+                    title = input_text[:50] + "..." if len(input_text) > 50 else input_text
                     cursor.execute("""
-                        INSERT INTO conversations (session_id)
-                        VALUES (%s)
-                        ON DUPLICATE KEY UPDATE session_id=session_id
-                    """, (session_id,))
+                        INSERT INTO conversations (session_id, title)
+                        VALUES (%s, %s)
+                        ON DUPLICATE KEY UPDATE title=%s
+                    """, (session_id, title, title))
                     
-                    # Store message
+                    # Store user message
                     cursor.execute("""
                         INSERT INTO messages (conversation_id, message_type, content)
                         VALUES ((SELECT conversation_id FROM conversations WHERE session_id = %s), 'user', %s)
                     """, (session_id, input_text))
                     
                     # Store generated DAG
+                    cursor.execute("""
+                        INSERT INTO messages (conversation_id, message_type, content)
+                        VALUES ((SELECT conversation_id FROM conversations WHERE session_id = %s), 'system', %s)
+                    """, (session_id, dag_script))
+                    
                     cursor.execute("""
                         INSERT INTO generated_dags (conversation_id, dag_script)
                         VALUES ((SELECT conversation_id FROM conversations WHERE session_id = %s), %s)
@@ -63,3 +101,5 @@ def generate_dag():
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    
+    
